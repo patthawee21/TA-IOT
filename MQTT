@@ -1,0 +1,146 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
+
+// ==================== CONFIGURATION ====================
+// 1. Wi-Fi Settings
+const char* ssid     = "Wokwi-GUEST";
+const char* password = "";
+
+// 2. MQTT TLS Settings
+const char* mqtt_server = "client3.consolutechcloud.com"; // เช่น hivemq, emqx หรือ broker ของตัวเอง
+const int   mqtt_port   = 8883;                   // MQTTS Port (TLS)
+const char* mqtt_user   = "admin";   // ใส่ถ้ามี (ถ้าไม่มีให้เว้นว่าง)
+const char* mqtt_pass   = "!C8FZ@H7k$6Y3dR9ePqW";   // ใส่ถ้ามี
+
+// --- แยก MQTT Topics สำหรับเซนเซอร์แต่ละตัว ---
+const char* topic_pot   = "farm/PF-A/sensor/potem1";
+const char* topic_ldr   = "farm/PF-A/sensor/ldr1";
+const char* topic_temp  = "farm/PF-A/sensor/temp1";
+const char* topic_hum   = "farm/PF-A/sensor/hum1";
+
+// 3. Pin Definitions
+#define POT_PIN      34  // Potentiometer Signal
+#define LDR_PIN      35  // LDR Analog Output
+#define DHT_PIN      15  // DHT22 Data Pin
+#define DHT_TYPE     DHT22
+
+// ==================== INITIALIZATIONS ====================
+LiquidCrystal_I2C lcd(0x27, 16, 2); // I2C Address มักจะเป็น 0x27 หรือ 0x3F
+DHT dht(DHT_PIN, DHT_TYPE);
+
+WiFiClientSecure espClient;
+PubSubClient client(espClient);
+
+unsigned long lastMsg = 0;
+
+// Helper function สำหรับสร้าง Payload รูปแบบ {"value": X} และสั่ง Publish
+void publishSensorValue(const char* topic, float value, int decimalPlaces = 1) {
+  String payload = "{\"value\": " + String(value, decimalPlaces) + "}";
+  client.publish(topic, payload.c_str());
+  Serial.printf("Published to [%s] -> %s\n", topic, payload.c_str());
+}
+
+// ==================== FUNCTIONS ====================
+void setupWiFi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(ssid);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi connected!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void reconnectMQTT() {
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT TLS connection...");
+    String clientId = "ESP32Client-" + String(random(0xffff), HEX);
+    
+    // พยายามเชื่อมต่อ MQTT
+    if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass)) {
+      Serial.println("CONNECTED (TLS Secure)");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      delay(5000);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize Peripherals
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("System Starting...");
+
+  dht.begin();
+  pinMode(POT_PIN, INPUT);
+  pinMode(LDR_PIN, INPUT);
+
+  // Connect WiFi
+  setupWiFi();
+
+  // Configure TLS
+  espClient.setInsecure(); // ข้ามการยืนยัน CA Cert สำหรับ Wokwi/Testing
+  client.setServer(mqtt_server, mqtt_port);
+
+  lcd.clear();
+}
+
+void loop() {
+  if (!client.connected()) {
+    reconnectMQTT();
+  }
+  client.loop();
+
+  // อ่านค่าและส่งข้อมูลทุกๆ 2 วินาที
+  unsigned long now = millis();
+  if (now - lastMsg > 2000) {
+    lastMsg = now;
+
+    // 1. อ่านค่าจากเซนเซอร์ทุกตัว
+    int potValue = analogRead(POT_PIN);
+    int ldrValue = analogRead(LDR_PIN);
+    float humidity = dht.readHumidity();
+    float tempC = dht.readTemperature();
+
+    if (isnan(humidity) || isnan(tempC)) {
+      Serial.println("Failed to read from DHT sensor!");
+      humidity = 0.0;
+      tempC = 0.0;
+    }
+
+    // 2. แสดงผลบน LCD
+    lcd.setCursor(0, 0);
+    lcd.print("T:" + String(tempC, 1) + "C H:" + String(humidity, 0) + "%  ");
+    lcd.setCursor(0, 1);
+    lcd.print("P:" + String(potValue) + " L:" + String(ldrValue) + "   ");
+
+    // 3. ยิงข้อมูลขึ้น MQTT แยกตาม Topic พร้อม Payload รูปแบบ {"value": X}
+    Serial.println("--- Publishing Data ---");
+    publishSensorValue(topic_pot, potValue, 0);       // {"value": 2048}
+    publishSensorValue(topic_ldr, ldrValue, 0);       // {"value": 1024}
+    publishSensorValue(topic_temp, tempC, 1);         // {"value": 28.5}
+    publishSensorValue(topic_hum, humidity, 1);       // {"value": 65.5}
+    Serial.println("-----------------------");
+  }
+}
+
+
